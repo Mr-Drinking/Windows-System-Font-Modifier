@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -239,10 +240,13 @@ def set_name(font: TTFont, name_id: int, value: str, lang_id: int = 0x0409) -> N
 def patch_metrics(font: TTFont, weight: int, italic: bool) -> None:
     if "OS/2" in font:
         font["OS/2"].usWeightClass = weight
+        font["OS/2"].fsSelection &= ~(0x01 | 0x20 | 0x40)
         if italic:
             font["OS/2"].fsSelection |= 0x01
-        else:
-            font["OS/2"].fsSelection &= ~0x01
+        if weight >= 700:
+            font["OS/2"].fsSelection |= 0x20
+        if weight == 400 and not italic:
+            font["OS/2"].fsSelection |= 0x40
     if "head" in font:
         if italic:
             font["head"].macStyle |= 0x02
@@ -254,9 +258,54 @@ def patch_metrics(font: TTFont, weight: int, italic: bool) -> None:
             font["head"].macStyle &= ~0x01
 
 
+def apply_synthetic_oblique(font: TTFont, angle_degrees: float = 11.0) -> bool:
+    shear = math.tan(math.radians(angle_degrees))
+    changed = False
+    if "glyf" in font:
+        glyf = font["glyf"]
+        for glyph_name in font.getGlyphOrder():
+            glyph = glyf[glyph_name]
+            if glyph.isComposite():
+                try:
+                    glyph.expand(glyf)
+                except Exception:
+                    continue
+            coordinates = getattr(glyph, "coordinates", None)
+            if not coordinates:
+                continue
+            for index, (x, y) in enumerate(coordinates):
+                coordinates[index] = (int(round(x + y * shear)), y)
+            glyph.recalcBounds(glyf)
+            changed = True
+
+    if "post" in font:
+        font["post"].italicAngle = -abs(angle_degrees)
+    if "hhea" in font:
+        font["hhea"].caretSlopeRise = 1000
+        font["hhea"].caretSlopeRun = int(round(shear * 1000))
+    return changed
+
+
+def axis_location(font: TTFont, weight: int) -> dict[str, float]:
+    if "fvar" not in font:
+        return {}
+
+    location: dict[str, float] = {}
+    for axis in font["fvar"].axes:
+        value = float(axis.defaultValue)
+        if axis.axisTag == "wght":
+            value = float(weight)
+        # Keep the generated font's Windows-facing weight class at the
+        # requested Segoe UI value, but do not ask the source VF for a value
+        # outside its real design space.
+        location[axis.axisTag] = max(float(axis.minValue), min(float(axis.maxValue), value))
+    return location
+
+
 def instantiate_if_needed(font: TTFont, weight: int) -> TTFont:
-    if "fvar" in font and "wght" in [axis.axisTag for axis in font["fvar"].axes]:
-        return instancer.instantiateVariableFont(font, {"wght": weight}, inplace=False)
+    location = axis_location(font, weight)
+    if location:
+        return instancer.instantiateVariableFont(font, location, inplace=False)
     return font
 
 
@@ -273,10 +322,13 @@ def make_font(
     typographic_subfamily: str | None = None,
     zh_family: str | None = None,
     zh_full_name: str | None = None,
+    synthetic_oblique: bool = False,
 ) -> TTFont:
     font = load_font(face)
     if not keep_variable:
         font = instantiate_if_needed(font, weight)
+    if synthetic_oblique:
+        apply_synthetic_oblique(font)
 
     clear_names(font)
     set_name(font, 1, family)
@@ -314,23 +366,71 @@ def build(source_family: str, out_dir: Path, manifest: Path) -> None:
     files: list[str] = []
 
     vf = variable_face(faces)
-    if vf:
-        segoe_vf = make_font(
-            vf,
-            "Segoe UI",
-            "Regular",
-            "Segoe UI",
-            "SegoeUI",
-            400,
-            False,
-            keep_variable=True,
-            typographic_family="Segoe UI",
-            typographic_subfamily="Regular",
-        )
-        segoe_vf_filename = f"{prefix}-segoe_vf{font_ext(segoe_vf)}"
-        generated["segoe_regular"] = save_font(segoe_vf, out_dir, segoe_vf_filename)
-        files.append(segoe_vf_filename)
+    prefer_variable_for_static = vf is not None
+    variable_source = vf is not None
+    variable_axes = list(vf.axes) if vf else []
+    synthetic_oblique: list[str] = []
+    synthetic_oblique_metadata_only: list[str] = []
 
+    def static_font(
+        key: str,
+        family: str,
+        subfamily: str,
+        full: str,
+        ps: str,
+        weight: int,
+        italic: bool,
+        typo_family: str | None = None,
+        typo_subfamily: str | None = None,
+        zh_family: str | None = None,
+        zh_full: str | None = None,
+    ) -> TTFont:
+        face = choose_face(faces, weight, italic, prefer_variable=prefer_variable_for_static)
+        make_oblique = italic and not face.italic
+        font = make_font(
+            face,
+            family,
+            subfamily,
+            full,
+            ps,
+            weight,
+            italic,
+            keep_variable=False,
+            typographic_family=typo_family,
+            typographic_subfamily=typo_subfamily,
+            zh_family=zh_family,
+            zh_full_name=zh_full,
+            synthetic_oblique=make_oblique,
+        )
+        if make_oblique:
+            if "glyf" in font:
+                synthetic_oblique.append(key)
+            else:
+                synthetic_oblique_metadata_only.append(key)
+        return font
+
+    specs = [
+        ("segoe_regular", "Segoe UI", "Regular", "Segoe UI", "SegoeUI", 400, False, None, None),
+        ("segoe_italic", "Segoe UI", "Italic", "Segoe UI Italic", "SegoeUI-Italic", 400, True, None, None),
+        ("segoe_bold", "Segoe UI", "Bold", "Segoe UI Bold", "SegoeUI-Bold", 700, False, None, None),
+        ("segoe_bold_italic", "Segoe UI", "Bold Italic", "Segoe UI Bold Italic", "SegoeUI-BoldItalic", 700, True, None, None),
+        ("segoe_semibold", "Segoe UI Semibold", "Regular", "Segoe UI Semibold", "SegoeUI-Semibold", 600, False, "Segoe UI", "Semibold"),
+        ("segoe_semibold_italic", "Segoe UI Semibold", "Italic", "Segoe UI Semibold Italic", "SegoeUI-SemiboldItalic", 600, True, "Segoe UI", "Semibold Italic"),
+        ("segoe_light", "Segoe UI Light", "Regular", "Segoe UI Light", "SegoeUI-Light", 300, False, "Segoe UI", "Light"),
+        ("segoe_light_italic", "Segoe UI Light", "Italic", "Segoe UI Light Italic", "SegoeUI-LightItalic", 300, True, "Segoe UI", "Light Italic"),
+        ("segoe_semilight", "Segoe UI Semilight", "Regular", "Segoe UI Semilight", "SegoeUI-Semilight", 350, False, "Segoe UI", "Semilight"),
+        ("segoe_semilight_italic", "Segoe UI Semilight", "Italic", "Segoe UI Semilight Italic", "SegoeUI-SemilightItalic", 350, True, "Segoe UI", "Semilight Italic"),
+        ("segoe_black", "Segoe UI Black", "Regular", "Segoe UI Black", "SegoeUI-Black", 900, False, "Segoe UI", "Black"),
+        ("segoe_black_italic", "Segoe UI Black", "Italic", "Segoe UI Black Italic", "SegoeUI-BlackItalic", 900, True, "Segoe UI", "Black Italic"),
+    ]
+
+    for key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily in specs:
+        font = static_font(key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily)
+        filename = f"{prefix}-{key}{font_ext(font)}"
+        generated[key] = save_font(font, out_dir, filename)
+        files.append(filename)
+
+    if vf:
         vf_font = make_font(
             vf,
             "Segoe UI Variable",
@@ -343,74 +443,26 @@ def build(source_family: str, out_dir: Path, manifest: Path) -> None:
             typographic_family="Segoe UI Variable",
             typographic_subfamily="Regular",
         )
-        variable_source = True
-        variable_axes = list(vf.axes)
-
-        vf_filename = f"{prefix}-segoe_variable{font_ext(vf_font)}"
-        generated["segoe_variable"] = save_font(vf_font, out_dir, vf_filename)
-        files.append(vf_filename)
-
-        msyh_vf = f"{prefix}-msyh_vf.ttc"
-        collection = TTCollection()
-        collection.fonts = [
-            make_font(vf, "Microsoft YaHei", "Regular", "Microsoft YaHei", "MicrosoftYaHei", 400, False, True, None, None, "微软雅黑", "微软雅黑"),
-            make_font(vf, "Microsoft YaHei UI", "Regular", "Microsoft YaHei UI", "MicrosoftYaHeiUI", 400, False, True),
-        ]
-        collection.save(str(out_dir / msyh_vf))
-        generated["msyh_regular"] = msyh_vf
-        generated["msyh_bold"] = msyh_vf
-        generated["msyh_light"] = msyh_vf
-        files.append(msyh_vf)
-
-        for key in [
-            "segoe_italic",
-            "segoe_bold",
-            "segoe_bold_italic",
-            "segoe_semibold",
-            "segoe_semibold_italic",
-            "segoe_light",
-            "segoe_light_italic",
-            "segoe_semilight",
-            "segoe_semilight_italic",
-            "segoe_black",
-            "segoe_black_italic",
-        ]:
-            generated[key] = generated["segoe_regular"]
     else:
-        specs = [
-            ("segoe_regular", "Segoe UI", "Regular", "Segoe UI", "SegoeUI", 400, False, None, None),
-            ("segoe_italic", "Segoe UI", "Italic", "Segoe UI Italic", "SegoeUI-Italic", 400, True, None, None),
-            ("segoe_bold", "Segoe UI", "Bold", "Segoe UI Bold", "SegoeUI-Bold", 700, False, None, None),
-            ("segoe_bold_italic", "Segoe UI", "Bold Italic", "Segoe UI Bold Italic", "SegoeUI-BoldItalic", 700, True, None, None),
-            ("segoe_semibold", "Segoe UI Semibold", "Regular", "Segoe UI Semibold", "SegoeUI-Semibold", 600, False, "Segoe UI", "Semibold"),
-            ("segoe_semibold_italic", "Segoe UI Semibold", "Italic", "Segoe UI Semibold Italic", "SegoeUI-SemiboldItalic", 600, True, "Segoe UI", "Semibold Italic"),
-            ("segoe_light", "Segoe UI Light", "Regular", "Segoe UI Light", "SegoeUI-Light", 300, False, "Segoe UI", "Light"),
-            ("segoe_light_italic", "Segoe UI Light", "Italic", "Segoe UI Light Italic", "SegoeUI-LightItalic", 300, True, "Segoe UI", "Light Italic"),
-            ("segoe_semilight", "Segoe UI Semilight", "Regular", "Segoe UI Semilight", "SegoeUI-Semilight", 350, False, "Segoe UI", "Semilight"),
-            ("segoe_semilight_italic", "Segoe UI Semilight", "Italic", "Segoe UI Semilight Italic", "SegoeUI-SemilightItalic", 350, True, "Segoe UI", "Semilight Italic"),
-            ("segoe_black", "Segoe UI Black", "Regular", "Segoe UI Black", "SegoeUI-Black", 900, False, "Segoe UI", "Black"),
-            ("segoe_black_italic", "Segoe UI Black", "Italic", "Segoe UI Black Italic", "SegoeUI-BlackItalic", 900, True, "Segoe UI", "Black Italic"),
-        ]
+        vf_font = static_font("segoe_variable", "Segoe UI Variable", "Regular", "Segoe UI Variable", "SegoeUIVariable", 400, False)
 
-        for key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily in specs:
-            face = choose_face(faces, weight, italic)
-            font = make_font(face, family, subfamily, full, ps, weight, italic, False, typo_family, typo_subfamily)
-            filename = f"{prefix}-{key}{font_ext(font)}"
-            generated[key] = save_font(font, out_dir, filename)
-            files.append(filename)
+    vf_filename = f"{prefix}-segoe_variable{font_ext(vf_font)}"
+    generated["segoe_variable"] = save_font(vf_font, out_dir, vf_filename)
+    files.append(vf_filename)
 
-        face = choose_face(faces, 400, False)
-        vf_font = make_font(face, "Segoe UI Variable", "Regular", "Segoe UI Variable", "SegoeUIVariable", 400, False)
-        variable_source = False
-        variable_axes = []
-
-        vf_filename = f"{prefix}-segoe_variable{font_ext(vf_font)}"
-        generated["segoe_variable"] = save_font(vf_font, out_dir, vf_filename)
-        files.append(vf_filename)
-
-    def yahei_font(family: str, subfamily: str, full: str, ps: str, weight: int, typo_family: str | None, typo_subfamily: str | None, zh_family: str | None, zh_full: str | None) -> TTFont:
-        face = choose_face(faces, weight, False)
-        return make_font(face, family, subfamily, full, ps, weight, False, False, typo_family, typo_subfamily, zh_family, zh_full)
+    def yahei_font(
+        key: str,
+        family: str,
+        subfamily: str,
+        full: str,
+        ps: str,
+        weight: int,
+        typo_family: str | None,
+        typo_subfamily: str | None,
+        zh_family: str | None,
+        zh_full: str | None,
+    ) -> TTFont:
+        return static_font(key, family, subfamily, full, ps, weight, False, typo_family, typo_subfamily, zh_family, zh_full)
 
     collections = [
         (
@@ -458,18 +510,13 @@ def build(source_family: str, out_dir: Path, manifest: Path) -> None:
         "Segoe UI Variable (TrueType)": generated["segoe_variable"],
     }
 
-    if vf:
-        font_registry["Microsoft YaHei & Microsoft YaHei UI (TrueType)"] = generated["msyh_regular"]
-        font_registry["Microsoft YaHei Bold & Microsoft YaHei UI Bold (TrueType)"] = generated["msyh_bold"]
-        font_registry["Microsoft YaHei Light & Microsoft YaHei UI Light (TrueType)"] = generated["msyh_light"]
-    else:
-        for key, registry_name, filename, face_specs in collections:
-            collection = TTCollection()
-            collection.fonts = [yahei_font(*spec) for spec in face_specs]
-            collection.save(str(out_dir / filename))
-            generated[key] = filename
-            files.append(filename)
-            font_registry[registry_name] = filename
+    for key, registry_name, filename, face_specs in collections:
+        collection = TTCollection()
+        collection.fonts = [yahei_font(key, *spec) for spec in face_specs]
+        collection.save(str(out_dir / filename))
+        generated[key] = filename
+        files.append(filename)
+        font_registry[registry_name] = filename
 
     data = {
         "source_family": source_family,
@@ -501,16 +548,24 @@ def build(source_family: str, out_dir: Path, manifest: Path) -> None:
             "MS Shell Dlg",
             "MS Shell Dlg 2",
         ],
+        "build_strategy": "static-system-entries",
+        "synthetic_oblique": sorted(set(synthetic_oblique)),
+        "synthetic_oblique_metadata_only": sorted(set(synthetic_oblique_metadata_only)),
         "variable_source": variable_source,
         "variable_axes": variable_axes,
     }
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built {len(files)} generated fonts in {out_dir}")
+    print("Segoe UI and Microsoft YaHei system entries use static generated fonts.")
     if variable_source:
         print(f"Segoe UI Variable uses a real variable source with axes: {', '.join(variable_axes)}")
     else:
         print("Warning: no variable source face was found; Segoe UI Variable uses a static fallback.")
+    if synthetic_oblique:
+        print(f"Synthetic oblique generated for: {', '.join(sorted(set(synthetic_oblique)))}")
+    if synthetic_oblique_metadata_only:
+        print(f"Warning: oblique metadata only for: {', '.join(sorted(set(synthetic_oblique_metadata_only)))}")
 
 
 def list_fonts(variable_only: bool) -> None:

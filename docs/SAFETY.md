@@ -1,40 +1,57 @@
-# Safety and Recovery
+# 安全和恢复
 
-This tool modifies registry settings used by Windows font discovery and UI fallback.
+这个工具会修改系统字体相关注册表。它不会覆盖微软原始字体文件，但仍然可能造成界面显示异常。
 
-It does not overwrite Microsoft font files, but an incorrect font mapping can still cause broken UI rendering, missing glyphs, or unreadable text.
+## 使用前建议
 
-## Backups
+1. 创建系统还原点。
+2. 确认你能打开管理员 PowerShell。
+3. 选择字形完整的字体，尤其是要覆盖中文界面时。
+4. 保留 `backups/` 文件夹。
 
-Each install creates a timestamped backup under:
+## 自动备份
+
+每次安装都会创建：
 
 ```text
-backups/<yyyyMMdd-HHmmss>/
+backups/<timestamp>/
 ```
 
-The backup contains exported registry keys and a JSON snapshot of changed font registry values.
+里面包含：
 
-Keep these files until you are sure the new font works.
+- 字体注册表备份。
+- `FontSubstitutes` 备份。
+- `FontLink\SystemLink` 备份。
+- 当前用户窗口字体设置备份。
+- 被修改字体项的 JSON 快照。
 
-## Restore
+## 普通恢复
 
-Run:
+运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Restore-SystemFont.ps1
 ```
 
-Then restart Windows.
+然后重启 Windows。
 
-## If Text Becomes Unreadable
+## 指定备份恢复
 
-1. Boot into Safe Mode or Windows Recovery Environment if needed.
-2. Run the restore script from an elevated PowerShell.
-3. Restart Windows.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Restore-SystemFont.ps1 -BackupDir ".\backups\20260611-000000"
+```
 
-If PowerShell text is unreadable, use the `.reg` files in the newest backup directory to restore the registry keys manually.
+然后重启 Windows。
 
-## Windows Updates
+## 如果界面文字严重异常
 
-Feature updates or system repair commands may restore some registry entries. Re-run the installer if the system falls back to the default fonts after an update.
+1. 尽量打开管理员 PowerShell。
+2. 运行恢复脚本。
+3. 重启。
+
+如果正常模式难以操作，可以进入安全模式或 Windows 恢复环境后再恢复注册表。
+
+## 系统更新
+
+Windows 大版本更新、系统修复、`sfc` / `dism` 可能恢复部分默认字体配置。更新后如果字体回到默认状态，重新运行安装脚本即可。
 
