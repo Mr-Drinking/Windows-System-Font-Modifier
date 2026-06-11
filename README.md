@@ -27,10 +27,10 @@
 
 1. 创建系统还原点。
 2. 保留本工具生成的 `backups/` 文件夹。
-3. 第一次先选一个字形完整、字重完整的字体。
+3. 第一次先选一个字形完整、字重完整的字体。要覆盖中文界面时，必须选择包含常见中文字形的字体。
 4. 修改后必须重启 Windows，再判断效果。
 
-恢复方法见下面的「恢复默认/恢复上一次配置」。
+恢复方法见下面的「恢复到备份状态」。
 
 ## 准备工作
 
@@ -118,6 +118,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -Sourc
 
 如果你选的是大型中文 VF，第一次生成静态实例可能需要几分钟，属于正常现象。
 
+如果工具提示源字体缺少常见 CJK 字形，说明它不适合作为 `Microsoft YaHei` / `微软雅黑` 的替身。建议换成覆盖中文的字体。
+
+如果你明确只想改英文界面，并且接受中文 fallback 可能显示异常，可以显式跳过这个保护：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Your Font" -AllowMissingCjk
+```
+
 执行完会看到类似：
 
 ```text
@@ -148,7 +156,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Verify-SystemFont.ps1
 
 它会显示当前 `Segoe UI`、`Segoe UI Variable`、`Microsoft YaHei` 等注册表项指向了哪些生成字体。
 
-## 恢复默认/恢复上一次配置
+## 恢复到备份状态
 
 恢复最近一次安装前的备份：
 
@@ -157,6 +165,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Restore-SystemFont.ps1
 ```
 
 然后重启 Windows。
+
+注意：恢复脚本会恢复到所选备份创建时的状态。第一次使用本工具前创建的备份通常就是 Windows 默认状态；如果你已经多次安装不同字体，最近备份对应的是“上一次配置”，不一定是微软默认配置。
 
 如果你要指定某个备份目录：
 
@@ -220,6 +230,7 @@ Black       900
 
 ```text
 dist/fonts/WSFM-*.ttf
+dist/fonts/WSFM-*.otf
 dist/fonts/WSFM-*.ttc
 dist/manifest.json
 backups/<timestamp>/
@@ -228,7 +239,7 @@ backups/<timestamp>/
 其中：
 
 - `dist/` 是生成字体和 manifest。
-- `backups/` 是恢复用备份。
+- `backups/` 是恢复用备份，包含注册表导出、目标字体替换值快照，以及本次安装写入的生成文件清单。
 - `WSFM-` 开头的字体文件会复制到 `C:\Windows\Fonts`。
 
 这些生成文件不会提交到 Git。

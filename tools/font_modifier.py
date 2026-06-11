@@ -6,7 +6,7 @@ import json
 import math
 import os
 import re
-import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -23,6 +23,7 @@ from fontTools.varLib import instancer
 FONT_REGISTRY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
 WINDOWS_FONT_DIR = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
 USER_FONT_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
+CJK_COVERAGE_SAMPLE = "的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年"
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,43 @@ def match_family(faces: Iterable[Face], family: str) -> list[Face]:
     return matched
 
 
+def cmap_codepoints(face: Face) -> set[int]:
+    try:
+        font = load_font(face)
+    except Exception:
+        return set()
+    if "cmap" not in font:
+        return set()
+    codepoints: set[int] = set()
+    for table in font["cmap"].tables:
+        codepoints.update(table.cmap.keys())
+    return codepoints
+
+
+def validate_source_coverage(faces: list[Face], allow_missing_cjk: bool) -> None:
+    covered: set[int] = set()
+    for face in faces:
+        covered.update(cmap_codepoints(face))
+
+    latin_sample = set(ord(char) for char in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    missing_latin = sorted(latin_sample - covered)
+    if missing_latin:
+        preview = "".join(chr(value) for value in missing_latin[:10])
+        raise SystemExit(f"Source family is missing basic Latin glyphs required for Segoe UI replacement: {preview}")
+
+    cjk_sample = set(ord(char) for char in CJK_COVERAGE_SAMPLE)
+    missing_cjk = sorted(cjk_sample - covered)
+    if missing_cjk and not allow_missing_cjk:
+        preview = "".join(chr(value) for value in missing_cjk[:12])
+        raise SystemExit(
+            "Source family is missing common CJK glyphs required for Microsoft YaHei replacement: "
+            f"{preview}. Choose a CJK-capable font, or pass --allow-missing-cjk if you accept broken Chinese fallback."
+        )
+    if missing_cjk:
+        preview = "".join(chr(value) for value in missing_cjk[:12])
+        print(f"Warning: source family is missing common CJK glyphs: {preview}")
+
+
 def load_font(face: Face) -> TTFont:
     if face.index is None:
         return TTFont(str(face.path))
@@ -355,13 +393,16 @@ def save_font(font: TTFont, out_dir: Path, filename: str) -> str:
     return filename
 
 
-def build(source_family: str, out_dir: Path, manifest: Path) -> None:
+def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: bool = False) -> None:
     faces = match_family(scan_faces(), source_family)
     if not faces:
         raise SystemExit(f"Installed font family not found: {source_family}")
+    validate_source_coverage(faces, allow_missing_cjk)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = "WSFM-" + hashlib.sha1(source_family.encode("utf-8")).hexdigest()[:8]
+    source_hash = hashlib.sha1(source_family.encode("utf-8")).hexdigest()[:8]
+    build_id = format(time.time_ns(), "x")[-8:]
+    prefix = f"WSFM-{source_hash}-{build_id}"
     generated: dict[str, str] = {}
     files: list[str] = []
 
@@ -625,6 +666,11 @@ def main() -> int:
     build_parser.add_argument("--source-family", required=True)
     build_parser.add_argument("--out-dir", required=True, type=Path)
     build_parser.add_argument("--manifest", required=True, type=Path)
+    build_parser.add_argument(
+        "--allow-missing-cjk",
+        action="store_true",
+        help="Allow a source family without common CJK glyphs, even though Chinese fallback may break.",
+    )
 
     sub.add_parser("verify", help="Inspect current Windows mappings.")
 
@@ -632,7 +678,7 @@ def main() -> int:
     if args.cmd == "list":
         list_fonts(args.variable_only)
     elif args.cmd == "build":
-        build(args.source_family, args.out_dir, args.manifest)
+        build(args.source_family, args.out_dir, args.manifest, args.allow_missing_cjk)
     elif args.cmd == "verify":
         verify()
     return 0

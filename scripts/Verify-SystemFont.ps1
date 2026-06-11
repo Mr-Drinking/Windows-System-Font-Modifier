@@ -18,7 +18,12 @@ Get-ItemProperty $fontsKey |
 
 try {
     & $PythonPath $Tool verify
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning 'Python verification failed. Registry output above is still useful.'
+        exit $LASTEXITCODE
+    }
 } catch {
     Write-Warning 'Python verification failed. Registry output above is still useful.'
+    exit 1
 }
 

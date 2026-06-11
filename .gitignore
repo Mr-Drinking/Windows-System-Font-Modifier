@@ -3,6 +3,7 @@ backups/
 *.log
 __pycache__/
 *.pyc
+.ruff_cache/
 .DS_Store
 Thumbs.db
 

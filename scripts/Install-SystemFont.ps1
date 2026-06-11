@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$SourceFamily,
-    [string]$PythonPath = 'python'
+    [string]$PythonPath = 'python',
+    [switch]$AllowMissingCjk
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,8 +21,11 @@ if (-not (Test-IsAdministrator)) {
         '-SourceFamily', "`"$SourceFamily`"",
         '-PythonPath', "`"$PythonPath`""
     )
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Verb RunAs -Wait
-    exit
+    if ($AllowMissingCjk) {
+        $args += '-AllowMissingCjk'
+    }
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Verb RunAs -Wait -PassThru
+    exit $process.ExitCode
 }
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -43,7 +47,11 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Python fontTools is required. Install it before running this tool.'
 }
 
-& $PythonPath $Tool build --source-family $SourceFamily --out-dir $Dist --manifest $Manifest
+$buildArgs = @($Tool, 'build', '--source-family', $SourceFamily, '--out-dir', $Dist, '--manifest', $Manifest)
+if ($AllowMissingCjk) {
+    $buildArgs += '--allow-missing-cjk'
+}
+& $PythonPath @buildArgs
 if ($LASTEXITCODE -ne 0) {
     throw 'Font build failed.'
 }
@@ -52,22 +60,67 @@ $ManifestText = [IO.File]::ReadAllText($Manifest, [Text.Encoding]::UTF8)
 $Data = $ManifestText | ConvertFrom-Json
 
 function Export-Key {
-    param([string]$RegPath, [string]$FileName)
+    param(
+        [string]$RegPath,
+        [string]$FileName,
+        [switch]$Optional
+    )
     $target = Join-Path $BackupDir $FileName
+    & reg.exe query $RegPath *> $null
+    if ($LASTEXITCODE -ne 0) {
+        if ($Optional) {
+            New-Item -ItemType File -Path (Join-Path $BackupDir "$FileName.missing") -Force | Out-Null
+            return
+        }
+        throw "Registry key not found or not readable: $RegPath"
+    }
     & reg.exe export $RegPath $target /y | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Registry export failed: $RegPath"
+    }
 }
 
 Export-Key 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' 'HKLM-Fonts.reg'
 Export-Key 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes' 'HKLM-FontSubstitutes.reg'
+Export-Key 'HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes' 'HKCU-FontSubstitutes.reg' -Optional
 Export-Key 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink' 'HKLM-FontLink-SystemLink.reg'
 Export-Key 'HKCU\Control Panel\Desktop\WindowMetrics' 'HKCU-WindowMetrics.reg'
 
-$changed = [ordered]@{}
-$current = Get-ItemProperty $FontsKey
-foreach ($prop in $Data.font_registry.PSObject.Properties) {
-    $changed[$prop.Name] = $current.($prop.Name)
+function Get-StringValueSnapshot {
+    param(
+        [string]$Path,
+        [string[]]$Names
+    )
+    $snapshot = [ordered]@{}
+    foreach ($name in $Names) {
+        $entry = [ordered]@{
+            present = $false
+            value = $null
+        }
+        try {
+            $value = Get-ItemPropertyValue -Path $Path -Name $name -ErrorAction Stop
+            $entry.present = $true
+            $entry.value = [string]$value
+        } catch {
+        }
+        $snapshot[$name] = $entry
+    }
+    return $snapshot
 }
-$changed | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $BackupDir 'font-values-before.json') -Encoding UTF8
+
+$fontRegistryNames = @($Data.font_registry.PSObject.Properties | ForEach-Object { $_.Name })
+$fontRegistryBefore = Get-StringValueSnapshot -Path $FontsKey -Names $fontRegistryNames
+$fontRegistryBefore | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $BackupDir 'font-registry-before.json') -Encoding UTF8
+
+$substituteNames = @($Data.font_substitutes | ForEach-Object { [string]$_ })
+$substitutesBefore = [ordered]@{
+    HKLM = Get-StringValueSnapshot -Path $SubstitutesHKLM -Names $substituteNames
+    HKCU = Get-StringValueSnapshot -Path $SubstitutesHKCU -Names $substituteNames
+}
+$substitutesBefore | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $BackupDir 'font-substitutes-before.json') -Encoding UTF8
+@($Data.files | ForEach-Object { [string]$_ }) |
+    ConvertTo-Json |
+    Set-Content -LiteralPath (Join-Path $BackupDir 'installed-files-after.json') -Encoding UTF8
 
 foreach ($file in $Data.files) {
     $source = Join-Path $Dist $file
@@ -75,9 +128,7 @@ foreach ($file in $Data.files) {
     if (-not (Test-Path -LiteralPath $source)) {
         throw "Generated font is missing: $source"
     }
-    if (-not (Test-Path -LiteralPath $dest)) {
-        Copy-Item -LiteralPath $source -Destination $dest -Force
-    }
+    Copy-Item -LiteralPath $source -Destination $dest -Force
 }
 
 foreach ($prop in $Data.font_registry.PSObject.Properties) {

@@ -13,4 +13,7 @@ if ($VariableOnly) {
 }
 
 & $PythonPath @args
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
