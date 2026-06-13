@@ -26,6 +26,7 @@ backups/<timestamp>/
 - 被修改字体项的 JSON 快照。
 - 被修改 `FontSubstitutes` 值的 JSON 快照。
 - 本次安装写入的生成字体文件清单。
+- 备份完成标记。
 
 ## 普通恢复
 
@@ -38,6 +39,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Restore-SystemFont.ps1
 然后重启 Windows。
 
 恢复脚本会恢复到所选备份创建时的状态。第一次安装前的备份通常对应 Windows 默认配置；如果你已经连续安装过多个字体，最近备份对应的是上一次配置。
+
+如果一次安装在生成字体阶段失败，自动恢复会跳过这种不完整的备份目录。
 
 恢复时，脚本会按快照删除安装时新增的 `FontSubstitutes` 值，并只清理本次安装写入且恢复后不再被注册表引用的 `WSFM-*` 字体文件。
 

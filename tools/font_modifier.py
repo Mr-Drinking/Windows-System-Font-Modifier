@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,14 @@ FONT_REGISTRY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
 WINDOWS_FONT_DIR = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
 USER_FONT_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
 CJK_COVERAGE_SAMPLE = "的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年"
+
+
+def configure_text_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 @dataclass(frozen=True)
@@ -656,6 +665,8 @@ def verify() -> None:
 
 
 def main() -> int:
+    configure_text_output()
+
     parser = argparse.ArgumentParser(description="Build Windows system font surrogate files from installed fonts.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
