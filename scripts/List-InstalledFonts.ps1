@@ -4,6 +4,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+try {
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    $OutputEncoding = [Console]::OutputEncoding
+} catch {
+}
+if (-not $env:PYTHONIOENCODING) {
+    $env:PYTHONIOENCODING = 'utf-8'
+}
+
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $Tool = Join-Path $Root 'tools\font_modifier.py'
 

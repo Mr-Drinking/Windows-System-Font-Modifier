@@ -7,6 +7,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+try {
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    $OutputEncoding = [Console]::OutputEncoding
+} catch {
+}
+if (-not $env:PYTHONIOENCODING) {
+    $env:PYTHONIOENCODING = 'utf-8'
+}
+
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -40,7 +49,6 @@ $SubstitutesHKCU = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubst
 $SystemLinkKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink'
 
 New-Item -ItemType Directory -Path $Dist -Force | Out-Null
-New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 
 & $PythonPath -c "import fontTools" | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -58,6 +66,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $ManifestText = [IO.File]::ReadAllText($Manifest, [Text.Encoding]::UTF8)
 $Data = $ManifestText | ConvertFrom-Json
+
+New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 
 function Export-Key {
     param(
@@ -121,6 +131,13 @@ $substitutesBefore | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Pa
 @($Data.files | ForEach-Object { [string]$_ }) |
     ConvertTo-Json |
     Set-Content -LiteralPath (Join-Path $BackupDir 'installed-files-after.json') -Encoding UTF8
+
+[ordered]@{
+    source_family = $SourceFamily
+    created_at = (Get-Date).ToString('o')
+    manifest = $Manifest
+} | ConvertTo-Json |
+    Set-Content -LiteralPath (Join-Path $BackupDir 'backup-complete.json') -Encoding UTF8
 
 foreach ($file in $Data.files) {
     $source = Join-Path $Dist $file

@@ -20,14 +20,29 @@ if (-not (Test-IsAdministrator)) {
 }
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
+function Test-RestorableBackup {
+    param([string]$Path)
+    return (Test-Path -LiteralPath (Join-Path $Path 'HKLM-Fonts.reg')) -and
+        (Test-Path -LiteralPath (Join-Path $Path 'font-registry-before.json')) -and
+        (Test-Path -LiteralPath (Join-Path $Path 'font-substitutes-before.json'))
+}
+
 if (-not $BackupDir) {
     $latest = Get-ChildItem -LiteralPath (Join-Path $Root 'backups') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-RestorableBackup $_.FullName } |
         Sort-Object Name -Descending |
         Select-Object -First 1
     if (-not $latest) {
-        throw 'No backup directory found.'
+        throw 'No restorable backup directory found.'
     }
     $BackupDir = $latest.FullName
+}
+
+if (-not (Test-Path -LiteralPath $BackupDir)) {
+    throw "Backup directory not found: $BackupDir"
+}
+if (-not (Test-RestorableBackup $BackupDir)) {
+    throw "Backup directory does not contain restorable registry snapshots: $BackupDir"
 }
 
 $FontsKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
