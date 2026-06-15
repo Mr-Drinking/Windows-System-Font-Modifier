@@ -49,6 +49,12 @@ class Face:
     axes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MetricsReference:
+    filename: str
+    family: str | None = None
+
+
 def normalize(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
@@ -305,6 +311,82 @@ def patch_metrics(font: TTFont, weight: int, italic: bool) -> None:
             font["head"].macStyle &= ~0x01
 
 
+def scaled_metric(value: int, source_upm: int, target_upm: int, unsigned: bool = False) -> int:
+    scaled = int(round(value * target_upm / source_upm))
+    if unsigned:
+        return max(0, scaled)
+    return scaled
+
+
+def reference_font(ref: MetricsReference) -> TTFont | None:
+    path = WINDOWS_FONT_DIR / ref.filename
+    if not path.exists():
+        return None
+    try:
+        if path.suffix.lower() in {".ttc", ".otc"}:
+            collection = TTCollection(str(path))
+            fonts = list(collection.fonts)
+        else:
+            fonts = [TTFont(str(path))]
+    except Exception:
+        return None
+
+    if not ref.family:
+        return fonts[0] if fonts else None
+
+    wanted = normalize(ref.family)
+    for font in fonts:
+        names = []
+        for name_id in (16, 1):
+            names.extend(name_values(font, name_id))
+        if any(normalize(name) == wanted for name in names):
+            return font
+    return fonts[0] if fonts else None
+
+
+def align_vertical_metrics(font: TTFont, ref: MetricsReference) -> bool:
+    original = reference_font(ref)
+    if original is None or "head" not in original or "head" not in font:
+        return False
+
+    source_upm = int(original["head"].unitsPerEm)
+    target_upm = int(font["head"].unitsPerEm)
+    if source_upm <= 0 or target_upm <= 0:
+        return False
+
+    if "OS/2" in font and "OS/2" in original:
+        os2 = font["OS/2"]
+        original_os2 = original["OS/2"]
+        for field in ("sTypoAscender", "sTypoDescender", "sTypoLineGap", "sxHeight", "sCapHeight"):
+            if hasattr(os2, field) and hasattr(original_os2, field):
+                setattr(os2, field, scaled_metric(int(getattr(original_os2, field)), source_upm, target_upm))
+        for field in ("usWinAscent", "usWinDescent"):
+            if hasattr(os2, field) and hasattr(original_os2, field):
+                setattr(os2, field, scaled_metric(int(getattr(original_os2, field)), source_upm, target_upm, unsigned=True))
+        if hasattr(os2, "fsSelection") and hasattr(original_os2, "fsSelection"):
+            use_typo_metrics = 0x80
+            os2.fsSelection = (os2.fsSelection & ~use_typo_metrics) | (original_os2.fsSelection & use_typo_metrics)
+
+    if "hhea" in font and "hhea" in original:
+        hhea = font["hhea"]
+        original_hhea = original["hhea"]
+        for field in ("ascent", "descent", "lineGap"):
+            setattr(hhea, field, scaled_metric(int(getattr(original_hhea, field)), source_upm, target_upm))
+
+    if "vhea" in font and "vhea" in original:
+        vhea = font["vhea"]
+        original_vhea = original["vhea"]
+        for field in ("ascent", "descent", "lineGap"):
+            setattr(vhea, field, scaled_metric(int(getattr(original_vhea, field)), source_upm, target_upm))
+
+    # Source variable fonts may carry metric deltas that no longer match the
+    # Windows reference metrics after the base values above are aligned.
+    if "MVAR" in font:
+        del font["MVAR"]
+
+    return True
+
+
 def apply_synthetic_oblique(font: TTFont, angle_degrees: float = 11.0) -> bool:
     shear = math.tan(math.radians(angle_degrees))
     changed = False
@@ -402,11 +484,32 @@ def save_font(font: TTFont, out_dir: Path, filename: str) -> str:
     return filename
 
 
-def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: bool = False) -> None:
-    faces = match_family(scan_faces(), source_family)
+def build(
+    source_family: str,
+    out_dir: Path,
+    manifest: Path,
+    allow_missing_cjk: bool = False,
+    segoe_variable_source_family: str | None = None,
+) -> None:
+    all_faces = scan_faces()
+    faces = match_family(all_faces, source_family)
     if not faces:
         raise SystemExit(f"Installed font family not found: {source_family}")
     validate_source_coverage(faces, allow_missing_cjk)
+
+    static_vf = variable_face(faces)
+    if segoe_variable_source_family:
+        segoe_variable_faces = match_family(all_faces, segoe_variable_source_family)
+        if not segoe_variable_faces:
+            raise SystemExit(f"Installed Segoe UI Variable source family not found: {segoe_variable_source_family}")
+        validate_source_coverage(segoe_variable_faces, allow_missing_cjk)
+        vf = variable_face(segoe_variable_faces)
+        if not vf:
+            raise SystemExit(f"Segoe UI Variable source family has no variable face: {segoe_variable_source_family}")
+        prefer_variable_for_static = False
+    else:
+        vf = static_vf
+        prefer_variable_for_static = vf is not None
 
     out_dir.mkdir(parents=True, exist_ok=True)
     source_hash = hashlib.sha1(source_family.encode("utf-8")).hexdigest()[:8]
@@ -415,12 +518,12 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
     generated: dict[str, str] = {}
     files: list[str] = []
 
-    vf = variable_face(faces)
-    prefer_variable_for_static = vf is not None
     variable_source = vf is not None
     variable_axes = list(vf.axes) if vf else []
     synthetic_oblique: list[str] = []
     synthetic_oblique_metadata_only: list[str] = []
+    metrics_aligned: list[str] = []
+    metrics_missing: list[str] = []
 
     def static_font(
         key: str,
@@ -434,6 +537,7 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
         typo_subfamily: str | None = None,
         zh_family: str | None = None,
         zh_full: str | None = None,
+        metrics_ref: MetricsReference | None = None,
     ) -> TTFont:
         face = choose_face(faces, weight, italic, prefer_variable=prefer_variable_for_static)
         make_oblique = italic and not face.italic
@@ -452,6 +556,11 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
             zh_full_name=zh_full,
             synthetic_oblique=make_oblique,
         )
+        if metrics_ref:
+            if align_vertical_metrics(font, metrics_ref):
+                metrics_aligned.append(key)
+            else:
+                metrics_missing.append(f"{key}:{metrics_ref.filename}")
         if make_oblique:
             if "glyf" in font:
                 synthetic_oblique.append(key)
@@ -460,22 +569,22 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
         return font
 
     specs = [
-        ("segoe_regular", "Segoe UI", "Regular", "Segoe UI", "SegoeUI", 400, False, None, None),
-        ("segoe_italic", "Segoe UI", "Italic", "Segoe UI Italic", "SegoeUI-Italic", 400, True, None, None),
-        ("segoe_bold", "Segoe UI", "Bold", "Segoe UI Bold", "SegoeUI-Bold", 700, False, None, None),
-        ("segoe_bold_italic", "Segoe UI", "Bold Italic", "Segoe UI Bold Italic", "SegoeUI-BoldItalic", 700, True, None, None),
-        ("segoe_semibold", "Segoe UI Semibold", "Regular", "Segoe UI Semibold", "SegoeUI-Semibold", 600, False, "Segoe UI", "Semibold"),
-        ("segoe_semibold_italic", "Segoe UI Semibold", "Italic", "Segoe UI Semibold Italic", "SegoeUI-SemiboldItalic", 600, True, "Segoe UI", "Semibold Italic"),
-        ("segoe_light", "Segoe UI Light", "Regular", "Segoe UI Light", "SegoeUI-Light", 300, False, "Segoe UI", "Light"),
-        ("segoe_light_italic", "Segoe UI Light", "Italic", "Segoe UI Light Italic", "SegoeUI-LightItalic", 300, True, "Segoe UI", "Light Italic"),
-        ("segoe_semilight", "Segoe UI Semilight", "Regular", "Segoe UI Semilight", "SegoeUI-Semilight", 350, False, "Segoe UI", "Semilight"),
-        ("segoe_semilight_italic", "Segoe UI Semilight", "Italic", "Segoe UI Semilight Italic", "SegoeUI-SemilightItalic", 350, True, "Segoe UI", "Semilight Italic"),
-        ("segoe_black", "Segoe UI Black", "Regular", "Segoe UI Black", "SegoeUI-Black", 900, False, "Segoe UI", "Black"),
-        ("segoe_black_italic", "Segoe UI Black", "Italic", "Segoe UI Black Italic", "SegoeUI-BlackItalic", 900, True, "Segoe UI", "Black Italic"),
+        ("segoe_regular", "Segoe UI", "Regular", "Segoe UI", "SegoeUI", 400, False, None, None, MetricsReference("segoeui.ttf")),
+        ("segoe_italic", "Segoe UI", "Italic", "Segoe UI Italic", "SegoeUI-Italic", 400, True, None, None, MetricsReference("segoeuii.ttf")),
+        ("segoe_bold", "Segoe UI", "Bold", "Segoe UI Bold", "SegoeUI-Bold", 700, False, None, None, MetricsReference("segoeuib.ttf")),
+        ("segoe_bold_italic", "Segoe UI", "Bold Italic", "Segoe UI Bold Italic", "SegoeUI-BoldItalic", 700, True, None, None, MetricsReference("segoeuiz.ttf")),
+        ("segoe_semibold", "Segoe UI Semibold", "Regular", "Segoe UI Semibold", "SegoeUI-Semibold", 600, False, "Segoe UI", "Semibold", MetricsReference("seguisb.ttf")),
+        ("segoe_semibold_italic", "Segoe UI Semibold", "Italic", "Segoe UI Semibold Italic", "SegoeUI-SemiboldItalic", 600, True, "Segoe UI", "Semibold Italic", MetricsReference("seguisbi.ttf")),
+        ("segoe_light", "Segoe UI Light", "Regular", "Segoe UI Light", "SegoeUI-Light", 300, False, "Segoe UI", "Light", MetricsReference("segoeuil.ttf")),
+        ("segoe_light_italic", "Segoe UI Light", "Italic", "Segoe UI Light Italic", "SegoeUI-LightItalic", 300, True, "Segoe UI", "Light Italic", MetricsReference("seguili.ttf")),
+        ("segoe_semilight", "Segoe UI Semilight", "Regular", "Segoe UI Semilight", "SegoeUI-Semilight", 350, False, "Segoe UI", "Semilight", MetricsReference("segoeuisl.ttf")),
+        ("segoe_semilight_italic", "Segoe UI Semilight", "Italic", "Segoe UI Semilight Italic", "SegoeUI-SemilightItalic", 350, True, "Segoe UI", "Semilight Italic", MetricsReference("seguisli.ttf")),
+        ("segoe_black", "Segoe UI Black", "Regular", "Segoe UI Black", "SegoeUI-Black", 900, False, "Segoe UI", "Black", MetricsReference("seguibl.ttf")),
+        ("segoe_black_italic", "Segoe UI Black", "Italic", "Segoe UI Black Italic", "SegoeUI-BlackItalic", 900, True, "Segoe UI", "Black Italic", MetricsReference("seguibli.ttf")),
     ]
 
-    for key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily in specs:
-        font = static_font(key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily)
+    for key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily, metrics_ref in specs:
+        font = static_font(key, family, subfamily, full, ps, weight, italic, typo_family, typo_subfamily, metrics_ref=metrics_ref)
         filename = f"{prefix}-{key}{font_ext(font)}"
         generated[key] = save_font(font, out_dir, filename)
         files.append(filename)
@@ -493,8 +602,21 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
             typographic_family="Segoe UI Variable",
             typographic_subfamily="Regular",
         )
+        if align_vertical_metrics(vf_font, MetricsReference("SegUIVar.ttf")):
+            metrics_aligned.append("segoe_variable")
+        else:
+            metrics_missing.append("segoe_variable:SegUIVar.ttf")
     else:
-        vf_font = static_font("segoe_variable", "Segoe UI Variable", "Regular", "Segoe UI Variable", "SegoeUIVariable", 400, False)
+        vf_font = static_font(
+            "segoe_variable",
+            "Segoe UI Variable",
+            "Regular",
+            "Segoe UI Variable",
+            "SegoeUIVariable",
+            400,
+            False,
+            metrics_ref=MetricsReference("SegUIVar.ttf"),
+        )
 
     vf_filename = f"{prefix}-segoe_variable{font_ext(vf_font)}"
     generated["segoe_variable"] = save_font(vf_font, out_dir, vf_filename)
@@ -511,8 +633,22 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
         typo_subfamily: str | None,
         zh_family: str | None,
         zh_full: str | None,
+        metrics_ref: MetricsReference | None,
     ) -> TTFont:
-        return static_font(key, family, subfamily, full, ps, weight, False, typo_family, typo_subfamily, zh_family, zh_full)
+        return static_font(
+            key,
+            family,
+            subfamily,
+            full,
+            ps,
+            weight,
+            False,
+            typo_family,
+            typo_subfamily,
+            zh_family,
+            zh_full,
+            metrics_ref,
+        )
 
     collections = [
         (
@@ -520,8 +656,8 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
             "Microsoft YaHei & Microsoft YaHei UI (TrueType)",
             f"{prefix}-msyh.ttc",
             [
-                ("Microsoft YaHei", "Regular", "Microsoft YaHei", "MicrosoftYaHei", 400, None, None, "微软雅黑", "微软雅黑"),
-                ("Microsoft YaHei UI", "Regular", "Microsoft YaHei UI", "MicrosoftYaHeiUI", 400, None, None, None, None),
+                ("Microsoft YaHei", "Regular", "Microsoft YaHei", "MicrosoftYaHei", 400, None, None, "微软雅黑", "微软雅黑", MetricsReference("msyh.ttc", "Microsoft YaHei")),
+                ("Microsoft YaHei UI", "Regular", "Microsoft YaHei UI", "MicrosoftYaHeiUI", 400, None, None, None, None, MetricsReference("msyh.ttc", "Microsoft YaHei UI")),
             ],
         ),
         (
@@ -529,8 +665,8 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
             "Microsoft YaHei Bold & Microsoft YaHei UI Bold (TrueType)",
             f"{prefix}-msyhbd.ttc",
             [
-                ("Microsoft YaHei", "Bold", "Microsoft YaHei Bold", "MicrosoftYaHei-Bold", 700, None, None, "微软雅黑", "微软雅黑 Bold"),
-                ("Microsoft YaHei UI", "Bold", "Microsoft YaHei UI Bold", "MicrosoftYaHeiUI-Bold", 700, None, None, None, None),
+                ("Microsoft YaHei", "Bold", "Microsoft YaHei Bold", "MicrosoftYaHei-Bold", 700, None, None, "微软雅黑", "微软雅黑 Bold", MetricsReference("msyhbd.ttc", "Microsoft YaHei")),
+                ("Microsoft YaHei UI", "Bold", "Microsoft YaHei UI Bold", "MicrosoftYaHeiUI-Bold", 700, None, None, None, None, MetricsReference("msyhbd.ttc", "Microsoft YaHei UI")),
             ],
         ),
         (
@@ -538,8 +674,8 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
             "Microsoft YaHei Light & Microsoft YaHei UI Light (TrueType)",
             f"{prefix}-msyhl.ttc",
             [
-                ("Microsoft YaHei Light", "Regular", "Microsoft YaHei Light", "MicrosoftYaHeiLight", 300, "Microsoft YaHei", "Light", "微软雅黑 Light", "微软雅黑 Light"),
-                ("Microsoft YaHei UI Light", "Regular", "Microsoft YaHei UI Light", "MicrosoftYaHeiUILight", 300, "Microsoft YaHei UI", "Light", None, None),
+                ("Microsoft YaHei Light", "Regular", "Microsoft YaHei Light", "MicrosoftYaHeiLight", 300, "Microsoft YaHei", "Light", "微软雅黑 Light", "微软雅黑 Light", MetricsReference("msyhl.ttc", "Microsoft YaHei Light")),
+                ("Microsoft YaHei UI Light", "Regular", "Microsoft YaHei UI Light", "MicrosoftYaHeiUILight", 300, "Microsoft YaHei UI", "Light", None, None, MetricsReference("msyhl.ttc", "Microsoft YaHei UI Light")),
             ],
         ),
     ]
@@ -570,6 +706,7 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
 
     data = {
         "source_family": source_family,
+        "segoe_variable_source_family": segoe_variable_source_family,
         "files": sorted(files),
         "generated_files": generated,
         "font_registry": font_registry,
@@ -599,6 +736,8 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
             "MS Shell Dlg 2",
         ],
         "build_strategy": "static-system-entries",
+        "metrics_aligned": sorted(set(metrics_aligned)),
+        "metrics_missing": sorted(set(metrics_missing)),
         "synthetic_oblique": sorted(set(synthetic_oblique)),
         "synthetic_oblique_metadata_only": sorted(set(synthetic_oblique_metadata_only)),
         "variable_source": variable_source,
@@ -609,13 +748,21 @@ def build(source_family: str, out_dir: Path, manifest: Path, allow_missing_cjk: 
     print(f"Built {len(files)} generated fonts in {out_dir}")
     print("Segoe UI and Microsoft YaHei system entries use static generated fonts.")
     if variable_source:
-        print(f"Segoe UI Variable uses a real variable source with axes: {', '.join(variable_axes)}")
+        if segoe_variable_source_family:
+            print(
+                "Segoe UI Variable uses a real variable source "
+                f"from {segoe_variable_source_family} with axes: {', '.join(variable_axes)}"
+            )
+        else:
+            print(f"Segoe UI Variable uses a real variable source with axes: {', '.join(variable_axes)}")
     else:
         print("Warning: no variable source face was found; Segoe UI Variable uses a static fallback.")
     if synthetic_oblique:
         print(f"Synthetic oblique generated for: {', '.join(sorted(set(synthetic_oblique)))}")
     if synthetic_oblique_metadata_only:
         print(f"Warning: oblique metadata only for: {', '.join(sorted(set(synthetic_oblique_metadata_only)))}")
+    if metrics_missing:
+        print(f"Warning: metrics alignment missing for: {', '.join(sorted(set(metrics_missing)))}")
 
 
 def list_fonts(variable_only: bool) -> None:
@@ -675,6 +822,7 @@ def main() -> int:
 
     build_parser = sub.add_parser("build", help="Build generated surrogate fonts.")
     build_parser.add_argument("--source-family", required=True)
+    build_parser.add_argument("--segoe-variable-source-family")
     build_parser.add_argument("--out-dir", required=True, type=Path)
     build_parser.add_argument("--manifest", required=True, type=Path)
     build_parser.add_argument(
@@ -689,7 +837,13 @@ def main() -> int:
     if args.cmd == "list":
         list_fonts(args.variable_only)
     elif args.cmd == "build":
-        build(args.source_family, args.out_dir, args.manifest, args.allow_missing_cjk)
+        build(
+            args.source_family,
+            args.out_dir,
+            args.manifest,
+            args.allow_missing_cjk,
+            args.segoe_variable_source_family,
+        )
     elif args.cmd == "verify":
         verify()
     return 0

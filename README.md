@@ -132,6 +132,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -Sourc
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Your Font" -AllowMissingCjk
 ```
 
+如果同一个字体同时安装了静态版和 VF 版，并且你希望普通系统字体保留静态版 hinting、只让 `Segoe UI Variable` 使用 VF，可以显式指定 VF 来源：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Sarasa Ui PropDigits SC" -SegoeVariableSourceFamily "Sarasa Ui VF PropDigits SC"
+```
+
+这种模式下，普通 `Segoe UI` / `Microsoft YaHei` / `Microsoft YaHei UI` 仍从 `-SourceFamily` 生成静态 surrogate，`Segoe UI Variable` 以及对应的 `FontSubstitutes` 会指向 `-SegoeVariableSourceFamily`。
+
 执行完会看到类似：
 
 ```text
@@ -204,6 +212,22 @@ Black       900
 ```
 
 如果源 VF 的 `wght` 轴范围没有覆盖某个值，工具会使用源字体允许的最接近轮廓，但生成字体暴露给 Windows 的字重仍保持对应的 Segoe UI 字重。
+
+如果通过 `-SegoeVariableSourceFamily` 指定了单独的 VF 来源，则普通系统字体项不会优先使用 VF，而是继续从静态来源选择最接近字重的静态 face；只有 `Segoe UI Variable` 保留 VF。
+
+## 基线和行距怎么处理
+
+生成 surrogate 时，工具会读取 Windows 原始字体文件的垂直指标，并按新字体自己的 `unitsPerEm` 等比例写入生成字体。覆盖范围包括影响 UI 行高和基线的 `OS/2` typo/win ascender、descender、lineGap，以及 `hhea` / `vhea` 的 ascent、descent、lineGap。
+
+这些参考值优先来自 Windows 原始文件名，例如：
+
+- `segoeui.ttf`
+- `SegUIVar.ttf`
+- `msyh.ttc`
+- `msyhbd.ttc`
+- `msyhl.ttc`
+
+这样即使你已经安装过一次本工具、当前注册表指向 `WSFM-*`，再次生成时仍会对齐微软原始字体的 UI 指标。对齐结果会写入 `dist/manifest.json` 的 `metrics_aligned` / `metrics_missing` 字段。
 
 ## 斜体怎么处理
 
