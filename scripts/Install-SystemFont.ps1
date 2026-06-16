@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$SourceFamily,
     [string]$SegoeVariableSourceFamily = '',
+    [ValidateSet('Auto', 'Modern', 'Windows10')]
+    [string]$CompatibilityProfile = 'Auto',
     [string]$PythonPath = 'python',
     [switch]$AllowMissingCjk
 )
@@ -29,6 +31,7 @@ if (-not (Test-IsAdministrator)) {
         '-ExecutionPolicy', 'Bypass',
         '-File', "`"$PSCommandPath`"",
         '-SourceFamily', "`"$SourceFamily`"",
+        '-CompatibilityProfile', "`"$CompatibilityProfile`"",
         '-PythonPath', "`"$PythonPath`""
     )
     if ($SegoeVariableSourceFamily) {
@@ -63,6 +66,7 @@ $buildArgs = @($Tool, 'build', '--source-family', $SourceFamily, '--out-dir', $D
 if ($SegoeVariableSourceFamily) {
     $buildArgs += @('--segoe-variable-source-family', $SegoeVariableSourceFamily)
 }
+$buildArgs += @('--compatibility-profile', $CompatibilityProfile.ToLowerInvariant())
 if ($AllowMissingCjk) {
     $buildArgs += '--allow-missing-cjk'
 }
@@ -145,6 +149,9 @@ $substitutesBefore | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Pa
 
 [ordered]@{
     source_family = $SourceFamily
+    segoe_variable_source_family = $SegoeVariableSourceFamily
+    compatibility_profile = $Data.compatibility_profile
+    effective_compatibility_profile = $Data.effective_compatibility_profile
     created_at = (Get-Date).ToString('o')
     manifest = $Manifest
 } | ConvertTo-Json |

@@ -25,6 +25,55 @@ FONT_REGISTRY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
 WINDOWS_FONT_DIR = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
 USER_FONT_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
 CJK_COVERAGE_SAMPLE = "的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年"
+STATIC_STYLE_SUFFIX_WORDS = {
+    "thin",
+    "extralight",
+    "extra",
+    "light",
+    "normal",
+    "regular",
+    "medium",
+    "semilight",
+    "semi",
+    "semibold",
+    "bold",
+    "heavy",
+    "black",
+    "italic",
+    "oblique",
+}
+STATIC_STYLE_SUFFIXES = {
+    "thin",
+    "extralight",
+    "extra light",
+    "light",
+    "normal",
+    "regular",
+    "medium",
+    "semilight",
+    "semi light",
+    "semibold",
+    "semi bold",
+    "bold",
+    "heavy",
+    "black",
+    "italic",
+    "oblique",
+    "thin italic",
+    "extralight italic",
+    "extra light italic",
+    "light italic",
+    "normal italic",
+    "regular italic",
+    "medium italic",
+    "semilight italic",
+    "semi light italic",
+    "semibold italic",
+    "semi bold italic",
+    "bold italic",
+    "heavy italic",
+    "black italic",
+}
 
 
 def configure_text_output() -> None:
@@ -206,11 +255,27 @@ def scan_faces() -> list[Face]:
     return faces
 
 
-def match_family(faces: Iterable[Face], family: str) -> list[Face]:
+def is_related_static_family(name: str, family: str) -> bool:
+    candidate = normalize(name)
+    wanted = normalize(family)
+    if not candidate.startswith(wanted + " "):
+        return False
+    suffix = candidate[len(wanted) :].strip()
+    if suffix in STATIC_STYLE_SUFFIXES:
+        return True
+    words = suffix.replace("-", " ").split()
+    return bool(words) and all(word in STATIC_STYLE_SUFFIX_WORDS for word in words)
+
+
+def match_family(faces: Iterable[Face], family: str, include_related_static: bool = False) -> list[Face]:
     wanted = normalize(family)
     matched = []
     for face in faces:
-        if any(normalize(name) == wanted for name in face.families):
+        if any(
+            normalize(name) == wanted
+            or (include_related_static and is_related_static_family(name, family))
+            for name in face.families
+        ):
             matched.append(face)
     return matched
 
@@ -342,6 +407,15 @@ def reference_font(ref: MetricsReference) -> TTFont | None:
         if any(normalize(name) == wanted for name in names):
             return font
     return fonts[0] if fonts else None
+
+
+def resolve_compatibility_profile(profile: str) -> str:
+    normalized = normalize(profile)
+    if normalized in {"modern", "windows10"}:
+        return normalized
+    if normalized != "auto":
+        raise SystemExit(f"Unsupported compatibility profile: {profile}")
+    return "modern" if (WINDOWS_FONT_DIR / "SegUIVar.ttf").exists() else "windows10"
 
 
 def align_vertical_metrics(font: TTFont, ref: MetricsReference) -> bool:
@@ -490,15 +564,25 @@ def build(
     manifest: Path,
     allow_missing_cjk: bool = False,
     segoe_variable_source_family: str | None = None,
+    compatibility_profile: str = "auto",
 ) -> None:
+    effective_compatibility_profile = resolve_compatibility_profile(compatibility_profile)
+    include_segoe_variable = effective_compatibility_profile == "modern"
     all_faces = scan_faces()
-    faces = match_family(all_faces, source_family)
+    faces = match_family(all_faces, source_family, include_related_static=True)
     if not faces:
         raise SystemExit(f"Installed font family not found: {source_family}")
     validate_source_coverage(faces, allow_missing_cjk)
 
     static_vf = variable_face(faces)
-    if segoe_variable_source_family:
+    if not include_segoe_variable:
+        vf = None
+        prefer_variable_for_static = static_vf is not None
+        if segoe_variable_source_family:
+            print(
+                "Warning: -SegoeVariableSourceFamily is ignored by the Windows10 compatibility profile."
+            )
+    elif segoe_variable_source_family:
         segoe_variable_faces = match_family(all_faces, segoe_variable_source_family)
         if not segoe_variable_faces:
             raise SystemExit(f"Installed Segoe UI Variable source family not found: {segoe_variable_source_family}")
@@ -524,6 +608,7 @@ def build(
     synthetic_oblique_metadata_only: list[str] = []
     metrics_aligned: list[str] = []
     metrics_missing: list[str] = []
+    source_faces: dict[str, list[dict[str, object]]] = {}
 
     def static_font(
         key: str,
@@ -540,6 +625,18 @@ def build(
         metrics_ref: MetricsReference | None = None,
     ) -> TTFont:
         face = choose_face(faces, weight, italic, prefer_variable=prefer_variable_for_static)
+        source_faces.setdefault(key, []).append(
+            {
+                "file": face.path.name,
+                "index": face.index,
+                "families": list(face.families),
+                "subfamily": face.subfamily,
+                "weight": face.weight,
+                "italic": face.italic,
+                "variable": face.variable,
+                "axes": list(face.axes),
+            }
+        )
         make_oblique = italic and not face.italic
         font = make_font(
             face,
@@ -589,7 +686,19 @@ def build(
         generated[key] = save_font(font, out_dir, filename)
         files.append(filename)
 
-    if vf:
+    if include_segoe_variable and vf:
+        source_faces["segoe_variable"] = [
+            {
+                "file": vf.path.name,
+                "index": vf.index,
+                "families": list(vf.families),
+                "subfamily": vf.subfamily,
+                "weight": vf.weight,
+                "italic": vf.italic,
+                "variable": vf.variable,
+                "axes": list(vf.axes),
+            }
+        ]
         vf_font = make_font(
             vf,
             "Segoe UI Variable",
@@ -606,7 +715,7 @@ def build(
             metrics_aligned.append("segoe_variable")
         else:
             metrics_missing.append("segoe_variable:SegUIVar.ttf")
-    else:
+    elif include_segoe_variable:
         vf_font = static_font(
             "segoe_variable",
             "Segoe UI Variable",
@@ -618,9 +727,10 @@ def build(
             metrics_ref=MetricsReference("SegUIVar.ttf"),
         )
 
-    vf_filename = f"{prefix}-segoe_variable{font_ext(vf_font)}"
-    generated["segoe_variable"] = save_font(vf_font, out_dir, vf_filename)
-    files.append(vf_filename)
+    if include_segoe_variable:
+        vf_filename = f"{prefix}-segoe_variable{font_ext(vf_font)}"
+        generated["segoe_variable"] = save_font(vf_font, out_dir, vf_filename)
+        files.append(vf_filename)
 
     def yahei_font(
         key: str,
@@ -693,8 +803,9 @@ def build(
         "Segoe UI Semilight Italic (TrueType)": generated["segoe_semilight_italic"],
         "Segoe UI Black (TrueType)": generated["segoe_black"],
         "Segoe UI Black Italic (TrueType)": generated["segoe_black_italic"],
-        "Segoe UI Variable (TrueType)": generated["segoe_variable"],
     }
+    if include_segoe_variable:
+        font_registry["Segoe UI Variable (TrueType)"] = generated["segoe_variable"]
 
     for key, registry_name, filename, face_specs in collections:
         collection = TTCollection()
@@ -707,14 +818,14 @@ def build(
     data = {
         "source_family": source_family,
         "segoe_variable_source_family": segoe_variable_source_family,
+        "compatibility_profile": compatibility_profile,
+        "effective_compatibility_profile": effective_compatibility_profile,
         "files": sorted(files),
         "generated_files": generated,
         "font_registry": font_registry,
+        "source_faces": source_faces,
         "font_substitutes": [
             "Segoe UI",
-            "Segoe UI Variable",
-            "Segoe UI Variable Display",
-            "Segoe UI Variable Text",
             "Segoe UI Light",
             "Segoe UI Semilight",
             "Segoe UI Semibold",
@@ -743,11 +854,20 @@ def build(
         "variable_source": variable_source,
         "variable_axes": variable_axes,
     }
+    if include_segoe_variable:
+        data["font_substitutes"][1:1] = [
+            "Segoe UI Variable",
+            "Segoe UI Variable Display",
+            "Segoe UI Variable Text",
+        ]
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built {len(files)} generated fonts in {out_dir}")
+    print(f"Compatibility profile: {effective_compatibility_profile}")
     print("Segoe UI and Microsoft YaHei system entries use static generated fonts.")
-    if variable_source:
+    if not include_segoe_variable:
+        print("Segoe UI Variable is skipped by the Windows10 compatibility profile.")
+    elif variable_source:
         if segoe_variable_source_family:
             print(
                 "Segoe UI Variable uses a real variable source "
@@ -823,6 +943,7 @@ def main() -> int:
     build_parser = sub.add_parser("build", help="Build generated surrogate fonts.")
     build_parser.add_argument("--source-family", required=True)
     build_parser.add_argument("--segoe-variable-source-family")
+    build_parser.add_argument("--compatibility-profile", choices=("auto", "modern", "windows10"), default="auto")
     build_parser.add_argument("--out-dir", required=True, type=Path)
     build_parser.add_argument("--manifest", required=True, type=Path)
     build_parser.add_argument(
@@ -843,6 +964,7 @@ def main() -> int:
             args.manifest,
             args.allow_missing_cjk,
             args.segoe_variable_source_family,
+            args.compatibility_profile,
         )
     elif args.cmd == "verify":
         verify()

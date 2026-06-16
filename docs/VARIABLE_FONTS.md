@@ -37,6 +37,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -Sourc
 
 这会让普通 `Segoe UI` / `Microsoft YaHei` 条目从静态家族生成，保留静态 hinting；`Segoe UI Variable` 和对应的 `FontSubstitutes` 则使用 VF 家族。这个模式适合静态字体在小字号 UI 下更清晰、但现代 WinUI 仍希望使用 VF 的情况。
 
+## 兼容 profile
+
+安装脚本提供 `-CompatibilityProfile`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Sarasa Ui PropDigits SC" -CompatibilityProfile Auto
+```
+
+可选值：
+
+- `Auto`：默认。系统存在 `SegUIVar.ttf` 时使用 `Modern`，否则使用 `Windows10`。
+- `Modern`：生成并注册 `Segoe UI Variable`，适合 Windows 11 和带有 `SegUIVar.ttf` 的较新系统。
+- `Windows10`：不生成、不注册 `Segoe UI Variable`，适合 Windows 10、UWP 和 WinUI 2 兼容测试。
+
+Windows 10 的系统字体列表没有 `Segoe UI Variable`；Windows 11 才引入 `SegUIVar.ttf`，其中包含 Display、Small、Text 等 named instances。Windows 10 / UWP / WinUI 2 时代更重要的是静态 `Segoe UI` 和 `Microsoft YaHei UI`。
+
+UWP / WinUI 的默认 XAML 字体资源是 `XamlAutoFontFamily`。它会按 app language 选择字体：日文使用 `Yu Gothic UI`，韩文使用 `Malgun Gothic`，其他语言使用 `Segoe UI`。对简体中文 UI 来说，生成的静态 `Segoe UI` surrogate 必须包含 CJK 字形，才能让 UWP 默认文本也使用目标字体。
+
 ## 如果源字体只有 VF
 
 如果一个字体家族「只有 VF，没有单独的 Regular/Bold/Light 静态文件」，本工具会从 VF 里提取静态实例给普通系统字体项使用。
@@ -53,6 +71,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -Sourc
 这些生成字体的 Windows 字重元数据会保持原 Segoe UI 语义。若源字体的 `wght` 轴范围没有覆盖目标值，工具会使用源字体允许的最接近轮廓，但仍把生成字体标成对应的目标字重。
 
 大型中文 VF 提取静态实例会比直接映射 VF 慢，也会生成更多文件。这里优先考虑 Windows 各类界面的稳定性。
+
+## 静态包的多 family 字重
+
+有些字体安装后会把静态字重拆成多个 family，例如：
+
+```text
+Sarasa Ui PropDigits SC
+Sarasa Ui PropDigits SC Light
+Sarasa Ui PropDigits SC Normal
+Sarasa Ui PropDigits SC Medium
+Sarasa Ui PropDigits SC Heavy
+```
+
+构建器会把这些和用户指定 family 同名、但只多出字重/斜体后缀的 family 归并为同一组候选。这样 `Segoe UI Light` 能选到源字体的 Light，`Segoe UI Semilight` 能选到 Normal，`Segoe UI Bold` 能选到 Bold，而不是全部落回 Regular。
+
+实际匹配结果会写入 `dist/manifest.json` 的 `source_faces`。如果静态流程看起来不对，先看这个字段最直接。
 
 ## 如果没有斜体
 
