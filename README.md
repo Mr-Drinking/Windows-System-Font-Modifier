@@ -132,6 +132,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -Sourc
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Your Font" -AllowMissingCjk
 ```
 
+如果同一个字体同时安装了静态版和 VF 版，并且你希望普通系统字体保留静态版 hinting、只让 `Segoe UI Variable` 使用 VF，可以显式指定 VF 来源：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Sarasa Ui PropDigits SC" -SegoeVariableSourceFamily "Sarasa Ui VF PropDigits SC"
+```
+
+这种模式下，普通 `Segoe UI` / `Microsoft YaHei` / `Microsoft YaHei UI` 仍从 `-SourceFamily` 生成静态 surrogate，`Segoe UI Variable` 以及对应的 `FontSubstitutes` 会指向 `-SegoeVariableSourceFamily`。
+
+如果你要以 Windows 10 / UWP / WinUI 2 兼容为底线，可以显式使用静态兼容 profile：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-SystemFont.ps1 -SourceFamily "Sarasa Ui PropDigits SC" -CompatibilityProfile Windows10
+```
+
+`-CompatibilityProfile Auto` 是默认值。它会在系统存在 `SegUIVar.ttf` 时使用现代 profile；没有 `SegUIVar.ttf` 时自动退回 Windows 10 profile。`Windows10` profile 不会生成或注册 `Segoe UI Variable`，只处理静态 `Segoe UI` / `Microsoft YaHei` / `Microsoft YaHei UI` 这些 Windows 10 和 UWP/WinUI 2 会用到的入口。
+
 执行完会看到类似：
 
 ```text
@@ -204,6 +220,32 @@ Black       900
 ```
 
 如果源 VF 的 `wght` 轴范围没有覆盖某个值，工具会使用源字体允许的最接近轮廓，但生成字体暴露给 Windows 的字重仍保持对应的 Segoe UI 字重。
+
+如果通过 `-SegoeVariableSourceFamily` 指定了单独的 VF 来源，则普通系统字体项不会优先使用 VF，而是继续从静态来源选择最接近字重的静态 face；只有 `Segoe UI Variable` 保留 VF。
+
+## Windows 10 / UWP 兼容
+
+[Windows 10 字体列表](https://learn.microsoft.com/en-us/typography/fonts/windows_10_font_list)包含静态 `Segoe UI` 系列和 `Microsoft YaHei UI`，但没有 `Segoe UI Variable`。而 [Windows 11 字体列表](https://learn.microsoft.com/en-us/typography/fonts/windows_11_font_list) 才列出 `Segoe UI Variable Display/Small/Text`，它们来自 `SegUIVar.ttf`。
+
+UWP / WinUI 的 `XamlAutoFontFamily` 是 XAML 控件默认字体；Microsoft 文档说明它会按 app language 选择字体：日文为 `Yu Gothic UI`，韩文为 `Malgun Gothic`，其他语言为 `Segoe UI`。因此简体中文场景下，Windows 10 兼容重点是静态 `Segoe UI` surrogate 本身要包含 CJK 字形，并且 `Microsoft YaHei UI` fallback 要能指向同一套生成字体。
+
+`-CompatibilityProfile Windows10` 会跳过 `Segoe UI Variable`，避免在没有 `SegUIVar.ttf` 的系统上凭空创建现代入口。`Modern` profile 才会处理 `Segoe UI Variable`；`Auto` 会根据本机是否存在 `SegUIVar.ttf` 自动选择。
+
+为了让静态字体包真正使用对应字重，构建器会把同一字体的静态 family 变体归并起来。例如选择 `Sarasa Ui PropDigits SC` 时，`Sarasa Ui PropDigits SC Light`、`Normal`、`Medium`、`Heavy` 也会参与匹配。实际选中的源 face 会写入 `dist/manifest.json` 的 `source_faces` 字段。
+
+## 基线和行距怎么处理
+
+生成 surrogate 时，工具会读取 Windows 原始字体文件的垂直指标，并按新字体自己的 `unitsPerEm` 等比例写入生成字体。覆盖范围包括影响 UI 行高和基线的 `OS/2` typo/win ascender、descender、lineGap，以及 `hhea` / `vhea` 的 ascent、descent、lineGap。
+
+这些参考值优先来自 Windows 原始文件名，例如：
+
+- `segoeui.ttf`
+- `SegUIVar.ttf`
+- `msyh.ttc`
+- `msyhbd.ttc`
+- `msyhl.ttc`
+
+这样即使你已经安装过一次本工具、当前注册表指向 `WSFM-*`，再次生成时仍会对齐微软原始字体的 UI 指标。对齐结果会写入 `dist/manifest.json` 的 `metrics_aligned` / `metrics_missing` 字段。
 
 ## 斜体怎么处理
 

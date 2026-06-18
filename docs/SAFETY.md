@@ -28,6 +28,10 @@ backups/<timestamp>/
 - 本次安装写入的生成字体文件清单。
 - 备份完成标记。
 
+如果当前用户没有 `HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes`，安装脚本会记录 `.missing` 标记并继续。恢复时，如果备份显示该键原本不存在，恢复脚本会删除安装过程中创建的 HKCU `FontSubstitutes` 键。
+
+如果某个可选 HKCU 键存在但无法完整导出，安装脚本会记录 `.export-failed` 标记，并继续依赖 JSON 快照恢复本工具实际修改过的值。HKLM 字体注册表和 `FontLink\SystemLink` 仍然是强制备份项，导出失败会中止安装。
+
 ## 普通恢复
 
 运行：

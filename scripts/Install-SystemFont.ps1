@@ -1,6 +1,9 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$SourceFamily,
+    [string]$SegoeVariableSourceFamily = '',
+    [ValidateSet('Auto', 'Modern', 'Windows10')]
+    [string]$CompatibilityProfile = 'Auto',
     [string]$PythonPath = 'python',
     [switch]$AllowMissingCjk
 )
@@ -28,8 +31,12 @@ if (-not (Test-IsAdministrator)) {
         '-ExecutionPolicy', 'Bypass',
         '-File', "`"$PSCommandPath`"",
         '-SourceFamily', "`"$SourceFamily`"",
+        '-CompatibilityProfile', "`"$CompatibilityProfile`"",
         '-PythonPath', "`"$PythonPath`""
     )
+    if ($SegoeVariableSourceFamily) {
+        $args += @('-SegoeVariableSourceFamily', "`"$SegoeVariableSourceFamily`"")
+    }
     if ($AllowMissingCjk) {
         $args += '-AllowMissingCjk'
     }
@@ -56,6 +63,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $buildArgs = @($Tool, 'build', '--source-family', $SourceFamily, '--out-dir', $Dist, '--manifest', $Manifest)
+if ($SegoeVariableSourceFamily) {
+    $buildArgs += @('--segoe-variable-source-family', $SegoeVariableSourceFamily)
+}
+$buildArgs += @('--compatibility-profile', $CompatibilityProfile.ToLowerInvariant())
 if ($AllowMissingCjk) {
     $buildArgs += '--allow-missing-cjk'
 }
@@ -76,8 +87,8 @@ function Export-Key {
         [switch]$Optional
     )
     $target = Join-Path $BackupDir $FileName
-    & reg.exe query $RegPath *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $providerPath = $RegPath -replace '^HKLM\\', 'Registry::HKEY_LOCAL_MACHINE\' -replace '^HKCU\\', 'Registry::HKEY_CURRENT_USER\'
+    if (-not (Test-Path -LiteralPath $providerPath)) {
         if ($Optional) {
             New-Item -ItemType File -Path (Join-Path $BackupDir "$FileName.missing") -Force | Out-Null
             return
@@ -86,6 +97,10 @@ function Export-Key {
     }
     & reg.exe export $RegPath $target /y | Out-Null
     if ($LASTEXITCODE -ne 0) {
+        if ($Optional) {
+            New-Item -ItemType File -Path (Join-Path $BackupDir "$FileName.export-failed") -Force | Out-Null
+            return
+        }
         throw "Registry export failed: $RegPath"
     }
 }
@@ -134,6 +149,9 @@ $substitutesBefore | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Pa
 
 [ordered]@{
     source_family = $SourceFamily
+    segoe_variable_source_family = $SegoeVariableSourceFamily
+    compatibility_profile = $Data.compatibility_profile
+    effective_compatibility_profile = $Data.effective_compatibility_profile
     created_at = (Get-Date).ToString('o')
     manifest = $Manifest
 } | ConvertTo-Json |
@@ -152,12 +170,21 @@ foreach ($prop in $Data.font_registry.PSObject.Properties) {
     New-ItemProperty -Path $FontsKey -Name $prop.Name -Value ([string]$prop.Value) -PropertyType String -Force | Out-Null
 }
 
+$variableSubstituteNames = @(
+    'Segoe UI Variable',
+    'Segoe UI Variable Display',
+    'Segoe UI Variable Text'
+)
 foreach ($key in @($SubstitutesHKLM, $SubstitutesHKCU)) {
     if (-not (Test-Path $key)) {
         New-Item -Path $key -Force | Out-Null
     }
     foreach ($name in $Data.font_substitutes) {
-        New-ItemProperty -Path $key -Name ([string]$name) -Value $SourceFamily -PropertyType String -Force | Out-Null
+        $substituteValue = $SourceFamily
+        if ($SegoeVariableSourceFamily -and $variableSubstituteNames.Contains([string]$name)) {
+            $substituteValue = $SegoeVariableSourceFamily
+        }
+        New-ItemProperty -Path $key -Name ([string]$name) -Value $substituteValue -PropertyType String -Force | Out-Null
     }
 }
 
