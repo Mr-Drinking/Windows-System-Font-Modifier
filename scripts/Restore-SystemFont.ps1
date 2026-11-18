@@ -48,6 +48,7 @@ if (-not (Test-RestorableBackup $BackupDir)) {
 $FontsKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
 $SubstitutesHKLM = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes'
 $SubstitutesHKCU = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes'
+$SystemLinkKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink'
 
 function Import-KeyFile {
     param([string]$FileName)
@@ -111,12 +112,24 @@ if (Test-Path -LiteralPath (Join-Path $BackupDir 'HKCU-FontSubstitutes.reg.missi
 function Get-ReferencedGeneratedFontFiles {
     $referenced = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $fontProperties = Get-ItemProperty -Path $FontsKey -ErrorAction SilentlyContinue
-    if (-not $fontProperties) {
-        return ,$referenced
+    if ($fontProperties) {
+        foreach ($prop in $fontProperties.PSObject.Properties) {
+            if ($prop.Value -is [string] -and $prop.Value -like 'WSFM-*') {
+                [void]$referenced.Add([IO.Path]::GetFileName($prop.Value))
+            }
+        }
     }
-    foreach ($prop in $fontProperties.PSObject.Properties) {
-        if ($prop.Value -is [string] -and $prop.Value -like 'WSFM-*') {
-            [void]$referenced.Add([IO.Path]::GetFileName($prop.Value))
+    # SystemLink entries look like "WSFM-...-msyh.ttc,Microsoft YaHei UI,128,96".
+    # A file still linked there must survive cleanup even if the Fonts key
+    # no longer names it.
+    $linkProperties = Get-ItemProperty -Path $SystemLinkKey -ErrorAction SilentlyContinue
+    if ($linkProperties) {
+        foreach ($prop in $linkProperties.PSObject.Properties) {
+            foreach ($entry in @($prop.Value)) {
+                if ($entry -is [string] -and $entry -like 'WSFM-*') {
+                    [void]$referenced.Add([IO.Path]::GetFileName(($entry -split ',')[0]))
+                }
+            }
         }
     }
     return ,$referenced

@@ -217,15 +217,27 @@ function Replace-SystemLink {
     New-ItemProperty -Path $SystemLinkKey -Name $ValueName -Value ([string[]]$updated) -PropertyType MultiString -Force | Out-Null
 }
 
-Replace-SystemLink -ValueName 'Segoe UI' -Patterns @('^MSYH\.TTC,Microsoft YaHei UI') -Replacement @(
+# Each value lists both the original Microsoft entry (first install) and the
+# entry an earlier run of this tool wrote (re-install). Without the WSFM-*
+# pattern a re-install leaves SystemLink pointing at the previous build.
+Replace-SystemLink -ValueName 'Segoe UI' -Patterns @(
+    '^MSYH\.TTC,Microsoft YaHei UI',
+    '^WSFM-[0-9a-f]+-[0-9a-f]+-msyh\.ttc,Microsoft YaHei UI'
+) -Replacement @(
     "$($Data.generated_files.msyh_regular),Microsoft YaHei UI,128,96",
     "$($Data.generated_files.msyh_regular),Microsoft YaHei UI"
 )
-Replace-SystemLink -ValueName 'Microsoft YaHei' -Patterns @('^SEGOEUI\.TTF,Segoe UI') -Replacement @(
+Replace-SystemLink -ValueName 'Microsoft YaHei' -Patterns @(
+    '^SEGOEUI\.TTF,Segoe UI',
+    '^WSFM-[0-9a-f]+-[0-9a-f]+-segoe_regular\.(ttf|otf),Segoe UI'
+) -Replacement @(
     "$($Data.generated_files.segoe_regular),Segoe UI,120,80",
     "$($Data.generated_files.segoe_regular),Segoe UI"
 )
-Replace-SystemLink -ValueName 'Microsoft YaHei UI' -Patterns @('^SEGOEUI\.TTF,Segoe UI') -Replacement @(
+Replace-SystemLink -ValueName 'Microsoft YaHei UI' -Patterns @(
+    '^SEGOEUI\.TTF,Segoe UI',
+    '^WSFM-[0-9a-f]+-[0-9a-f]+-segoe_regular\.(ttf|otf),Segoe UI'
+) -Replacement @(
     "$($Data.generated_files.segoe_regular),Segoe UI,120,80",
     "$($Data.generated_files.segoe_regular),Segoe UI"
 )
