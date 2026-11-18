@@ -137,7 +137,10 @@ $fontRegistryNames = @($Data.font_registry.PSObject.Properties | ForEach-Object 
 $fontRegistryBefore = Get-StringValueSnapshot -Path $FontsKey -Names $fontRegistryNames
 $fontRegistryBefore | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $BackupDir 'font-registry-before.json') -Encoding UTF8
 
-$substituteNames = @($Data.font_substitutes | ForEach-Object { [string]$_ })
+# font_substitutes_removed lists names that earlier versions wrote and this
+# version deletes. They are part of the snapshot so Restore can put them back.
+$staleSubstituteNames = @($Data.font_substitutes_removed | Where-Object { $_ } | ForEach-Object { [string]$_ })
+$substituteNames = @($Data.font_substitutes | ForEach-Object { [string]$_ }) + $staleSubstituteNames
 $substitutesBefore = [ordered]@{
     HKLM = Get-StringValueSnapshot -Path $SubstitutesHKLM -Names $substituteNames
     HKCU = Get-StringValueSnapshot -Path $SubstitutesHKCU -Names $substituteNames
@@ -185,6 +188,9 @@ foreach ($key in @($SubstitutesHKLM, $SubstitutesHKCU)) {
             $substituteValue = $SegoeVariableSourceFamily
         }
         New-ItemProperty -Path $key -Name ([string]$name) -Value $substituteValue -PropertyType String -Force | Out-Null
+    }
+    foreach ($name in $staleSubstituteNames) {
+        Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue
     }
 }
 

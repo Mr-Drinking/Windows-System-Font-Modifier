@@ -530,6 +530,13 @@ def make_font(
     font = load_font(face)
     if not keep_variable:
         font = instantiate_if_needed(font, weight)
+        # Windows' static Segoe UI / Microsoft YaHei files have no STAT table.
+        # The source's STAT names faces after the source (e.g. "Heavy" for
+        # Segoe UI Black, "Regular" at 400 for Segoe UI Semilight built from a
+        # 400 face), and DirectWrite trusts it over the name table, so lookups
+        # by the Windows family names fall back to Segoe UI Regular.
+        if "STAT" in font:
+            del font["STAT"]
     if synthetic_oblique:
         apply_synthetic_oblique(font)
 
@@ -826,25 +833,32 @@ def build(
         "source_faces": source_faces,
         "font_substitutes": [
             "Segoe UI",
-            "Segoe UI Light",
-            "Segoe UI Semilight",
-            "Segoe UI Semibold",
             "Segoe UI Bold",
-            "Segoe UI Black",
             "Microsoft YaHei",
             "Microsoft YaHei UI",
-            "Microsoft YaHei Light",
-            "Microsoft YaHei UI Light",
             "Microsoft YaHei Bold",
             "Microsoft YaHei UI Bold",
             "微软雅黑",
             "微软雅黑 UI",
-            "微软雅黑 Light",
             "微软雅黑 UI Light",
             "微软雅黑 Bold",
             "微软雅黑 UI Bold",
             "MS Shell Dlg",
             "MS Shell Dlg 2",
+        ],
+        # Single-weight GDI families that the generated fonts provide. With a
+        # substitute, GDI compares weights across both families, so e.g.
+        # "Segoe UI Semibold" at FW_NORMAL picks the source Regular instead of
+        # the Semibold surrogate. Install removes these if an older version
+        # wrote them.
+        "font_substitutes_removed": [
+            "Segoe UI Light",
+            "Segoe UI Semilight",
+            "Segoe UI Semibold",
+            "Segoe UI Black",
+            "Microsoft YaHei Light",
+            "Microsoft YaHei UI Light",
+            "微软雅黑 Light",
         ],
         "build_strategy": "static-system-entries",
         "metrics_aligned": sorted(set(metrics_aligned)),
